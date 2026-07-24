@@ -53,6 +53,5 @@ jobs:
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'api-participa-backend-dmf5edfjhudjbucb'
-          slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
           package: '*.jar'
