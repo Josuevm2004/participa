@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: read #This is required for actions/checkout
 
     steps:
       - uses: actions/checkout@v4
@@ -25,39 +25,39 @@ jobs:
           distribution: 'microsoft'
 
       - name: Build with Maven
-        run: mvn -B -DskipTests package
-        working-directory: back/participaapp
+        run: mvn clean install
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: java-app
-          path: '${{ github.workspace }}/back/participaapp/target/*.jar'
+          path: '${{ github.workspace }}/target/*.jar'
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      id-token: write
-      contents: read
-
+      id-token: write #This is required for requesting the JWT
+      contents: read #This is required for actions/checkout
+  
     steps:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
         with:
           name: java-app
-
+      
       - name: Login to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_ADE63FCD219E4764BBC80DDAFA14EA41 }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_9FF0F986318F4402B460A716CCBB1A61 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_32482FB920EE44999903DF6F01D08EF8 }}
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_96B8A876A5534DCAAEAF7F73AF182315 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_D0F5CC2A5DD24A8281EE60DC4000823B }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_F32B4C17304246FD98EE9E1719219854 }}
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'api-participa-backend-dmf5edfjhudjbucb'
+          app-name: 'api-participa-backend'
           slot-name: 'Production'
           package: '*.jar'
+          
