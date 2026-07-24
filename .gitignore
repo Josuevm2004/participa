@@ -1,0 +1,33 @@
+# Master .gitignore for Participa App
+
+# Java Spring Boot Target & Build Artifacts
+**/target/
+**/.mvn/
+**/mvnw
+**/mvnw.cmd
+*.class
+*.jar
+*.war
+
+# IDE & Editor Files
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.factorypath
+.vscode/
+
+# Node.js & Frontend Build Artifacts
+node_modules/
+dist/
+build/
+.npm
+*.log
+npm-debug.log*
+
+# Environment & Local Data
+.env
+.env.local
+*.tmp
+*.bak

@@ -9,6 +9,7 @@ import {
   clearAllResponses,
   setActivePollRoom,
   subscribeState,
+  formatCodeWithHyphen,
   PASTEL_COLORS
 } from './store.js';
 
@@ -362,7 +363,7 @@ function exportRoomToPDF() {
       let y = 18;
 
       // Header Banner
-      doc.setFillColor(16, 163, 127); // #10A37F
+      doc.setFillColor(16, 163, 127);
       doc.rect(0, 0, pageWidth, 12, 'F');
       
       doc.setFont('helvetica', 'bold');
@@ -417,30 +418,25 @@ function exportRoomToPDF() {
         const textLines = doc.splitTextToSize(resp.text, pageWidth - 42);
         const cardHeight = 14 + (textLines.length * 5);
 
-        // Page overflow check
         if (y + cardHeight > pageHeight - 15) {
           doc.addPage();
           y = 20;
         }
 
-        // Draw Card Background (Soft Gray / Light Pastel)
         doc.setFillColor(250, 250, 250);
         doc.setDrawColor(229, 231, 235);
         doc.roundedRect(14, y, pageWidth - 28, cardHeight, 3, 3, 'FD');
 
-        // Student Name & Number
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(10);
         doc.setTextColor(32, 33, 35);
         doc.text(`${index + 1}. ${resp.studentName}`, 18, y + 6);
 
-        // Date
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(8);
         doc.setTextColor(107, 114, 128);
         doc.text(new Date(resp.createdAt).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }), pageWidth - 22, y + 6, { align: 'right' });
 
-        // Response Text
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(9.5);
         doc.setTextColor(50, 50, 50);
@@ -449,7 +445,6 @@ function exportRoomToPDF() {
         y += cardHeight + 4;
       });
 
-      // Save PDF file
       const fileName = `Participa_Respuestas_${room.code}_${room.title.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
       doc.save(fileName);
       showToast('✅ ¡PDF descargado correctamente!');
@@ -459,7 +454,6 @@ function exportRoomToPDF() {
     }
   }
 
-  // Fallback if jsPDF unavailable: Browser print to PDF
   window.print();
 }
 
@@ -471,7 +465,6 @@ document.getElementById('btn-show-qr')?.addEventListener('click', () => {
   const qrContainer = document.getElementById('qr-code-svg');
   qrContainer.innerHTML = ''; // Clear previous QR
 
-  // Build direct join URL with code parameter
   const joinUrl = `${window.location.origin}${window.location.pathname}?code=${currentRoomCode}`;
 
   if (window.QRCode) {
@@ -505,7 +498,7 @@ async function checkUrlRoomCode() {
   const urlParams = new URLSearchParams(window.location.search);
   const codeParam = urlParams.get('code');
   if (codeParam) {
-    const formattedCode = codeParam.toUpperCase().trim();
+    const formattedCode = formatCodeWithHyphen(codeParam);
     const joinInput = document.getElementById('join-room-code');
     if (joinInput) {
       joinInput.value = formattedCode;
@@ -532,14 +525,12 @@ function renderStudentView() {
   document.getElementById('student-name-display').textContent = currentStudentName || 'Estudiante';
   document.getElementById('student-question-text').textContent = room.question;
 
-  // Reset inputs & visibility
   document.getElementById('student-input-container').style.display = 'flex';
   document.getElementById('student-success-container').style.display = 'none';
   document.getElementById('student-response-text').value = '';
   updateCharCounter();
 }
 
-// Character counter
 const textarea = document.getElementById('student-response-text');
 textarea?.addEventListener('input', updateCharCounter);
 
@@ -560,7 +551,6 @@ document.getElementById('btn-submit-response')?.addEventListener('click', () => 
 
   addStudentResponse(currentRoomCode, currentStudentName, text);
   
-  // Show success view
   document.getElementById('student-input-container').style.display = 'none';
   document.getElementById('student-success-container').style.display = 'flex';
   showToast('¡Respuesta enviada en tiempo real!');
@@ -584,7 +574,6 @@ subscribeState((roomCode) => {
   if (currentRole === 'teacher' && currentRoomCode) {
     renderTeacherView();
   } else if (currentRole === 'student' && currentRoomCode) {
-    // Update student's question in real time if teacher changes it
     const room = getRoom(currentRoomCode);
     if (room) {
       document.getElementById('student-question-text').textContent = room.question;
@@ -593,7 +582,7 @@ subscribeState((roomCode) => {
 });
 
 // ============================================================================
-// HELPERS (Time formatting, Initials, Simple SVG QR)
+// HELPERS
 // ============================================================================
 function formatTimeAgo(timestamp) {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
@@ -623,12 +612,10 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
-// Generate simple SVG QR pattern for visual completeness
 function generateSimpleQRSVG(code) {
   return `
     <svg width="160" height="160" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
       <rect width="100" height="100" fill="white"/>
-      <!-- QR Position Markers -->
       <rect x="10" y="10" width="25" height="25" fill="#202123"/>
       <rect x="14" y="14" width="17" height="17" fill="white"/>
       <rect x="18" y="18" width="9" height="9" fill="#10A37F"/>
@@ -641,7 +628,6 @@ function generateSimpleQRSVG(code) {
       <rect x="14" y="69" width="17" height="17" fill="white"/>
       <rect x="18" y="73" width="9" height="9" fill="#10A37F"/>
 
-      <!-- Data Dots -->
       <rect x="42" y="15" width="6" height="6" fill="#202123"/>
       <rect x="50" y="25" width="6" height="6" fill="#202123"/>
       <rect x="42" y="35" width="6" height="6" fill="#10A37F"/>
@@ -658,5 +644,4 @@ function generateSimpleQRSVG(code) {
   `;
 }
 
-// Initial Landing view activate
 switchView('home');

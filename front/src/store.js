@@ -1,4 +1,10 @@
-// Participa Store - Robust Event-Driven Sync & Aggregation Engine
+// Participa Store - Connected to Java Spring Boot Backend (Azure SQL) & Real-time Sync
+
+const API_BASE_URL = window.PARTICIPA_API_URL || (
+  window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:8080/api'
+    : `${window.location.origin}/api`
+);
 
 const STORAGE_KEY = 'participa_app_rooms_v1';
 const CHANNEL_NAME = 'participa_channel_v1';
@@ -19,14 +25,9 @@ if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
   broadcastChannel = new BroadcastChannel(CHANNEL_NAME);
 }
 
-// PeerJS Instances
-let teacherPeer = null;
-let studentPeer = null;
-let studentConn = null;
-let connectedStudentConns = [];
-
 // Memory Cache & Listeners
 let listeners = [];
+let pollerActiveRoomCode = null;
 
 export function subscribeState(callback) {
   listeners.push(callback);
@@ -64,6 +65,25 @@ function saveRoomsData(data) {
   } catch (e) {}
 }
 
+export function formatCodeWithHyphen(code) {
+  if (!code) return '';
+  const clean = code.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  if (clean.length === 6) {
+    return clean.substring(0, 3) + '-' + clean.substring(3, 6);
+  }
+  return clean;
+}
+
+function updateLocalRoomCache(room) {
+  if (!room || !room.code) return;
+  const rooms = getRoomsData();
+  const formatted = formatCodeWithHyphen(room.code);
+  rooms[formatted] = room;
+  rooms[room.code.toUpperCase()] = room;
+  saveRoomsData(rooms);
+  notifyListeners(formatted);
+}
+
 export function generateRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
   const nums = '23456789';
@@ -79,8 +99,11 @@ export function generateRoomCode() {
 }
 
 // ----------------------------------------------------------------------------
-// WEBRTC PEERJS (Direct Browser P2P)
+// WEBRTC PEERJS FALLBACKS
 // ----------------------------------------------------------------------------
+let teacherPeer = null;
+let studentPeer = null;
+
 function getPeerId(code) {
   const cleanCode = (code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   return `participa_peer_${cleanCode}`;
@@ -89,111 +112,70 @@ function getPeerId(code) {
 export function initTeacherPeer(roomCode) {
   if (!window.Peer || !roomCode) return;
   const peerId = getPeerId(roomCode);
-
   try {
     if (teacherPeer) {
       try { teacherPeer.destroy(); } catch (e) {}
     }
-
     teacherPeer = new window.Peer(peerId, { debug: 1 });
-
-    teacherPeer.on('connection', (conn) => {
-      connectedStudentConns.push(conn);
-
-      conn.on('open', () => {
-        const room = getRoom(roomCode);
-        if (room) {
-          conn.send({ type: 'ROOM_SYNC', room });
-        }
-      });
-
-      conn.on('data', (data) => {
-        if (data && data.type === 'SUBMIT_RESPONSE') {
-          addStudentResponse(roomCode, data.studentName, data.text);
-        }
-      });
-
-      conn.on('close', () => {
-        connectedStudentConns = connectedStudentConns.filter(c => c !== conn);
-      });
-    });
   } catch (e) {}
-}
-
-function broadcastToStudents(room) {
-  connectedStudentConns.forEach(conn => {
-    try {
-      if (conn.open) {
-        conn.send({ type: 'ROOM_SYNC', room });
-      }
-    } catch (e) {}
-  });
 }
 
 export function connectStudentPeer(roomCode, onSyncCallback) {
   if (!window.Peer || !roomCode) return;
   const hostPeerId = getPeerId(roomCode);
-
   try {
     if (studentPeer) {
       try { studentPeer.destroy(); } catch (e) {}
     }
-
     studentPeer = new window.Peer();
-
-    studentPeer.on('open', () => {
-      studentConn = studentPeer.connect(hostPeerId, { reliable: true });
-
-      studentConn.on('data', (data) => {
-        if (data && data.type === 'ROOM_SYNC' && data.room) {
-          const rooms = getRoomsData();
-          rooms[roomCode] = data.room;
-          saveRoomsData(rooms);
-          if (onSyncCallback) onSyncCallback(data.room);
-          notifyListeners(roomCode);
-        }
-      });
-    });
   } catch (e) {}
 }
 
-function sendResponseToTeacherP2P(studentName, text) {
-  if (studentConn && studentConn.open) {
-    try {
-      studentConn.send({ type: 'SUBMIT_RESPONSE', studentName, text });
-      return true;
-    } catch (e) {}
+// Live polling engine (polls backend Spring Boot & Cloud fallback every 1.5 seconds)
+setInterval(async () => {
+  if (!pollerActiveRoomCode) return;
+  await syncRoomWithBackend(pollerActiveRoomCode);
+}, 1500);
+
+export function setActivePollRoom(code) {
+  if (code) {
+    pollerActiveRoomCode = formatCodeWithHyphen(code);
+    syncRoomWithBackend(pollerActiveRoomCode);
+  } else {
+    pollerActiveRoomCode = null;
   }
-  return false;
 }
 
 // ----------------------------------------------------------------------------
-// CLOUD EVENT AGGREGATOR ENGINE (Prevents Overwriting)
+// BACKEND API SYNC & HYBRID FALLBACK ENGINE
 // ----------------------------------------------------------------------------
-function getTopicUrl(code) {
-  const cleanCode = (code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-  return `${NTFY_BASE_URL}${cleanCode}`;
-}
+async function syncRoomWithBackend(code) {
+  if (!code) return null;
+  const formattedCode = formatCodeWithHyphen(code);
 
-// Publish payload (Room snapshot or Student response event)
-async function publishToCloud(code, payload) {
-  if (!code || !payload) return;
   try {
-    const topicUrl = getTopicUrl(code);
-    await fetch(topicUrl, {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    });
-  } catch (e) {}
+    const res = await fetch(`${API_BASE_URL}/rooms/${formattedCode}`);
+    if (res.ok) {
+      const roomData = await res.json();
+      if (roomData && roomData.code) {
+        updateLocalRoomCache(roomData);
+        return roomData;
+      }
+    }
+  } catch (e) {
+    // Backend offline fallback - try cloud ntfy
+  }
+
+  return await syncRoomWithCloud(formattedCode);
 }
 
-// Sync room & merge incoming student responses without losing any data
 async function syncRoomWithCloud(code) {
   if (!code) return null;
-  const cleanCode = code.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-  
+  const formattedCode = formatCodeWithHyphen(code);
+  const cleanTopicCode = formattedCode.replace(/[^a-zA-Z0-9]/g, '');
+
   try {
-    const topicUrl = `${getTopicUrl(cleanCode)}/json?poll=1`;
+    const topicUrl = `${NTFY_BASE_URL}${cleanTopicCode}/json?poll=1`;
     const res = await fetch(topicUrl);
     if (!res.ok) return null;
 
@@ -202,7 +184,7 @@ async function syncRoomWithCloud(code) {
 
     const lines = text.trim().split('\n');
     let rooms = getRoomsData();
-    let currentRoom = rooms[cleanCode] || null;
+    let currentRoom = rooms[formattedCode] || null;
     let hasChanges = false;
 
     lines.forEach(line => {
@@ -211,13 +193,11 @@ async function syncRoomWithCloud(code) {
         if (item && item.message) {
           const payload = JSON.parse(item.message);
 
-          // 1. Room Creation / Snapshot Event
           if (payload.type === 'ROOM_SNAPSHOT' && payload.room) {
             if (!currentRoom) {
               currentRoom = payload.room;
               hasChanges = true;
             } else {
-              // Update metadata (question / title)
               if (currentRoom.question !== payload.room.question) {
                 currentRoom.question = payload.room.question;
                 hasChanges = true;
@@ -229,11 +209,10 @@ async function syncRoomWithCloud(code) {
             }
           }
 
-          // 2. Individual Student Response Event (Merge by ID)
           if (payload.type === 'STUDENT_RESPONSE' && payload.response) {
             if (!currentRoom) {
               currentRoom = {
-                code: cleanCode,
+                code: formattedCode,
                 teacherName: 'Profesor',
                 title: 'Aula Interactiva',
                 question: '¿Qué aprendiste hoy?',
@@ -255,9 +234,9 @@ async function syncRoomWithCloud(code) {
     });
 
     if (currentRoom && hasChanges) {
-      rooms[cleanCode] = currentRoom;
+      rooms[formattedCode] = currentRoom;
       saveRoomsData(rooms);
-      notifyListeners(cleanCode);
+      notifyListeners(formattedCode);
     }
 
     return currentRoom;
@@ -265,43 +244,55 @@ async function syncRoomWithCloud(code) {
   return null;
 }
 
-// Live polling engine (polls cloud every 2 seconds and merges responses)
-let pollerActiveRoomCode = null;
-setInterval(async () => {
-  if (!pollerActiveRoomCode) return;
-  await syncRoomWithCloud(pollerActiveRoomCode);
-}, 2000);
-
-export function setActivePollRoom(code) {
-  pollerActiveRoomCode = code;
-}
-
 // ----------------------------------------------------------------------------
-// PUBLIC ACTIONS
+// PUBLIC ACTIONS (BACKEND CONNECTED & SYNCHRONOUS UI COMPATIBLE)
 // ----------------------------------------------------------------------------
 
 // 1. Create Room (Teacher)
 export function createRoom(teacherName, roomTitle, questionText) {
+  const tName = teacherName.trim() || 'Profesor';
+  const rTitle = roomTitle.trim() || 'Aula Interactiva';
+  const qText = questionText.trim() || '¿Qué aprendiste en la clase de hoy?';
+
   const rooms = getRoomsData();
   const roomCode = generateRoomCode();
-  
+
   const newRoom = {
     code: roomCode,
-    teacherName: teacherName.trim() || 'Profesor',
-    title: roomTitle.trim() || 'Aula Interactiva',
-    question: questionText.trim() || '¿Qué aprendiste en la clase de hoy?',
+    teacherName: tName,
+    title: rTitle,
+    question: qText,
     createdAt: Date.now(),
     isActive: true,
     responses: []
   };
 
-  rooms[roomCode] = newRoom;
-  saveRoomsData(rooms);
-  
-  initTeacherPeer(roomCode);
-  publishToCloud(roomCode, { type: 'ROOM_SNAPSHOT', room: newRoom });
+  updateLocalRoomCache(newRoom);
   setActivePollRoom(roomCode);
   broadcastChange('CREATE_ROOM', { roomCode });
+
+  // Sync with Spring Boot backend asynchronously
+  fetch(`${API_BASE_URL}/rooms`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({
+      code: roomCode,
+      teacherName: tName,
+      title: rTitle,
+      question: qText
+    })
+  })
+    .then(res => res.ok ? res.json() : null)
+    .then(backendRoom => {
+      if (backendRoom && backendRoom.code) {
+        updateLocalRoomCache(backendRoom);
+        setActivePollRoom(backendRoom.code);
+      }
+    })
+    .catch(e => {
+      console.warn('Backend unavailable during createRoom, using local room state:', e);
+    });
+
   return newRoom;
 }
 
@@ -309,26 +300,27 @@ export function createRoom(teacherName, roomTitle, questionText) {
 export function getRoom(roomCode) {
   if (!roomCode) return null;
   const rooms = getRoomsData();
-  const code = roomCode.toUpperCase().trim();
-  return rooms[code] || null;
+  const rawCode = roomCode.toUpperCase().trim();
+  const formattedCode = formatCodeWithHyphen(rawCode);
+  const cleanCode = rawCode.replace(/[^a-zA-Z0-9]/g, '');
+
+  return rooms[formattedCode] || rooms[rawCode] || rooms[cleanCode] || null;
 }
 
 export async function getRoomAsync(roomCode) {
   if (!roomCode) return null;
-  const code = roomCode.toUpperCase().trim();
+  const formattedCode = formatCodeWithHyphen(roomCode);
 
-  let room = getRoom(code);
-  const cloudRoom = await syncRoomWithCloud(code);
-  
-  if (cloudRoom) {
-    setActivePollRoom(code);
-    connectStudentPeer(code);
-    return cloudRoom;
+  let room = getRoom(formattedCode);
+  const backendRoom = await syncRoomWithBackend(formattedCode);
+
+  if (backendRoom) {
+    setActivePollRoom(formattedCode);
+    return backendRoom;
   }
 
   if (room) {
-    setActivePollRoom(code);
-    connectStudentPeer(code);
+    setActivePollRoom(formattedCode);
     return room;
   }
 
@@ -337,100 +329,139 @@ export async function getRoomAsync(roomCode) {
 
 // 3. Update Active Question (Teacher)
 export function updateRoomQuestion(roomCode, newQuestion) {
+  if (!roomCode) return;
+  const code = formatCodeWithHyphen(roomCode);
+  const qText = newQuestion.trim();
+
   const rooms = getRoomsData();
-  const room = rooms[roomCode];
+  const room = getRoom(code);
   if (room) {
-    room.question = newQuestion;
-    saveRoomsData(rooms);
-    publishToCloud(roomCode, { type: 'ROOM_SNAPSHOT', room });
-    broadcastToStudents(room);
-    broadcastChange('UPDATE_QUESTION', { roomCode });
-    notifyListeners(roomCode);
+    room.question = qText;
+    updateLocalRoomCache(room);
   }
+
+  fetch(`${API_BASE_URL}/rooms/${code}/question`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ question: qText })
+  })
+    .then(res => res.ok ? res.json() : null)
+    .then(updatedRoom => {
+      if (updatedRoom) updateLocalRoomCache(updatedRoom);
+    })
+    .catch(e => {
+      console.warn('Backend error on updateRoomQuestion:', e);
+    });
+
+  broadcastChange('UPDATE_QUESTION', { roomCode: code });
 }
 
 // 4. Add Student Response
-export async function addStudentResponse(roomCode, studentName, responseText) {
-  let room = getRoom(roomCode);
-  if (!room) {
-    room = await getRoomAsync(roomCode);
-  }
+export function addStudentResponse(roomCode, studentName, responseText) {
+  if (!roomCode) return null;
+  const code = formatCodeWithHyphen(roomCode);
+  const sName = studentName.trim() || 'Estudiante';
+  const text = responseText.trim();
+
+  let room = getRoom(code);
 
   const responsesCount = room && room.responses ? room.responses.length : 0;
   const colorIndex = responsesCount % PASTEL_COLORS.length;
 
-  const newResponse = {
+  const tempResponse = {
     id: 'resp_' + Math.random().toString(36).substr(2, 9),
-    studentName: studentName.trim() || 'Estudiante',
-    text: responseText.trim(),
+    studentName: sName,
+    text: text,
     colorIndex: colorIndex,
     createdAt: Date.now(),
     isPinned: false
   };
 
   if (room) {
-    room.responses.unshift(newResponse);
-    const rooms = getRoomsData();
-    rooms[roomCode] = room;
-    saveRoomsData(rooms);
+    room.responses.unshift(tempResponse);
+    updateLocalRoomCache(room);
   }
 
-  // Publish ONLY the student's individual response event to cloud
-  publishToCloud(roomCode, {
-    type: 'STUDENT_RESPONSE',
-    roomCode,
-    response: newResponse
-  });
+  fetch(`${API_BASE_URL}/rooms/${code}/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({
+      studentName: sName,
+      text: text
+    })
+  })
+    .then(res => res.ok ? res.json() : null)
+    .then(createdResponse => {
+      if (createdResponse) syncRoomWithBackend(code);
+    })
+    .catch(e => {
+      console.warn('Backend unavailable on addStudentResponse:', e);
+    });
 
-  sendResponseToTeacherP2P(studentName, responseText);
-  if (room) broadcastToStudents(room);
-  broadcastChange('ADD_RESPONSE', { roomCode, responseId: newResponse.id });
-  notifyListeners(roomCode);
-  return newResponse;
+  broadcastChange('ADD_RESPONSE', { roomCode: code, responseId: tempResponse.id });
+  return tempResponse;
 }
 
 // 5. Toggle Pin Response
 export function togglePinResponse(roomCode, responseId) {
-  const rooms = getRoomsData();
-  const room = rooms[roomCode];
+  if (!roomCode) return;
+  const code = formatCodeWithHyphen(roomCode);
+
+  const room = getRoom(code);
   if (room) {
     const resp = room.responses.find(r => r.id === responseId);
     if (resp) {
       resp.isPinned = !resp.isPinned;
       room.responses.sort((a, b) => (b.isPinned ? 1 : 0) - (a.isPinned ? 1 : 0));
-      saveRoomsData(rooms);
-      publishToCloud(roomCode, { type: 'ROOM_SNAPSHOT', room });
-      broadcastToStudents(room);
-      broadcastChange('PIN_RESPONSE', { roomCode, responseId });
-      notifyListeners(roomCode);
+      updateLocalRoomCache(room);
     }
   }
+
+  fetch(`${API_BASE_URL}/responses/${responseId}/pin`, {
+    method: 'PUT'
+  })
+    .then(res => res.ok ? syncRoomWithBackend(code) : null)
+    .catch(e => console.warn('Backend error on togglePinResponse:', e));
+
+  broadcastChange('PIN_RESPONSE', { roomCode: code, responseId });
 }
 
 // 6. Delete Response
 export function deleteResponse(roomCode, responseId) {
-  const rooms = getRoomsData();
-  const room = rooms[roomCode];
+  if (!roomCode) return;
+  const code = formatCodeWithHyphen(roomCode);
+
+  const room = getRoom(code);
   if (room) {
     room.responses = room.responses.filter(r => r.id !== responseId);
-    saveRoomsData(rooms);
-    publishToCloud(roomCode, { type: 'ROOM_SNAPSHOT', room });
-    broadcastToStudents(room);
-    broadcastChange('DELETE_RESPONSE', { roomCode, responseId });
-    notifyListeners(roomCode);
+    updateLocalRoomCache(room);
   }
+
+  fetch(`${API_BASE_URL}/responses/${responseId}`, {
+    method: 'DELETE'
+  })
+    .then(res => res.ok ? syncRoomWithBackend(code) : null)
+    .catch(e => console.warn('Backend error on deleteResponse:', e));
+
+  broadcastChange('DELETE_RESPONSE', { roomCode: code, responseId });
 }
 
 // 7. Clear All Responses
 export function clearAllResponses(roomCode) {
-  const rooms = getRoomsData();
-  const room = rooms[roomCode];
+  if (!roomCode) return;
+  const code = formatCodeWithHyphen(roomCode);
+
+  const room = getRoom(code);
   if (room) {
     room.responses = [];
-    saveRoomsData(rooms);
-    publishToCloud(roomCode, { type: 'ROOM_SNAPSHOT', room });
-    broadcastToStudents(room);
-    broadcastChange('CLEAR_RESPONSES', { roomCode });
-    notifyListeners(roomCode);
+    updateLocalRoomCache(room);
   }
+
+  fetch(`${API_BASE_URL}/rooms/${code}/responses`, {
+    method: 'DELETE'
+  })
+    .then(res => res.ok ? syncRoomWithBackend(code) : null)
+    .catch(e => console.warn('Backend error on clearAllResponses:', e));
+
+  broadcastChange('CLEAR_RESPONSES', { roomCode: code });
 }
