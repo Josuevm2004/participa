@@ -1,4 +1,4 @@
-// Participa Store & Multi-Device Cloud Engine (Powered by ntfy.sh)
+// Participa Store - WebRTC PeerJS & Cloud Sync Engine
 
 const STORAGE_KEY = 'participa_app_rooms_v1';
 const CHANNEL_NAME = 'participa_channel_v1';
@@ -18,6 +18,12 @@ let broadcastChannel = null;
 if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
   broadcastChannel = new BroadcastChannel(CHANNEL_NAME);
 }
+
+// PeerJS Realtime Instances
+let teacherPeer = null;
+let studentPeer = null;
+let studentConn = null;
+let connectedStudentConns = [];
 
 // Memory Cache & Listeners
 let listeners = [];
@@ -81,14 +87,128 @@ export function generateRoomCode() {
 }
 
 // ----------------------------------------------------------------------------
-// GLOBAL MULTI-DEVICE CLOUD SYNC ENGINE (ntfy.sh)
+// WEBRTC PEERJS MULTI-DEVICE CONNECTION (Laptop <---> Mobile Phones)
+// ----------------------------------------------------------------------------
+function getPeerId(code) {
+  const cleanCode = (code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  return `participa_peer_${cleanCode}`;
+}
+
+// Teacher PeerJS Host Setup
+export function initTeacherPeer(roomCode) {
+  if (!window.Peer || !roomCode) return;
+  const peerId = getPeerId(roomCode);
+
+  try {
+    if (teacherPeer) {
+      try { teacherPeer.destroy(); } catch (e) {}
+    }
+
+    teacherPeer = new window.Peer(peerId, { debug: 1 });
+
+    teacherPeer.on('open', (id) => {
+      console.log('Teacher P2P Room Host active:', id);
+    });
+
+    teacherPeer.on('connection', (conn) => {
+      connectedStudentConns.push(conn);
+
+      // Send current room data to newly connected student
+      conn.on('open', () => {
+        const room = getRoom(roomCode);
+        if (room) {
+          conn.send({ type: 'ROOM_SYNC', room });
+        }
+      });
+
+      // Handle student actions
+      conn.on('data', (data) => {
+        if (data && data.type === 'SUBMIT_RESPONSE') {
+          addStudentResponse(roomCode, data.studentName, data.text);
+        }
+      });
+
+      conn.on('close', () => {
+        connectedStudentConns = connectedStudentConns.filter(c => c !== conn);
+      });
+    });
+
+    teacherPeer.on('error', (err) => {
+      console.warn('Teacher P2P notice:', err.type);
+    });
+  } catch (e) {
+    console.warn('PeerJS init fallback:', e);
+  }
+}
+
+// Broadcast room updates to all connected student phones
+function broadcastToStudents(room) {
+  connectedStudentConns.forEach(conn => {
+    try {
+      if (conn.open) {
+        conn.send({ type: 'ROOM_SYNC', room });
+      }
+    } catch (e) {}
+  });
+}
+
+// Student PeerJS Client Connect
+export function connectStudentPeer(roomCode, onSyncCallback) {
+  if (!window.Peer || !roomCode) return;
+  const hostPeerId = getPeerId(roomCode);
+
+  try {
+    if (studentPeer) {
+      try { studentPeer.destroy(); } catch (e) {}
+    }
+
+    studentPeer = new window.Peer();
+
+    studentPeer.on('open', () => {
+      studentConn = studentPeer.connect(hostPeerId, { reliable: true });
+
+      studentConn.on('open', () => {
+        console.log('Connected directly to Teacher room');
+      });
+
+      studentConn.on('data', (data) => {
+        if (data && data.type === 'ROOM_SYNC' && data.room) {
+          const rooms = getRoomsData();
+          rooms[roomCode] = data.room;
+          saveRoomsData(rooms);
+          if (onSyncCallback) onSyncCallback(data.room);
+          notifyListeners(roomCode);
+        }
+      });
+    });
+  } catch (e) {
+    console.warn('Student P2P connect fallback:', e);
+  }
+}
+
+// Send response directly to Teacher P2P host
+function sendResponseToTeacherP2P(studentName, text) {
+  if (studentConn && studentConn.open) {
+    try {
+      studentConn.send({
+        type: 'SUBMIT_RESPONSE',
+        studentName,
+        text
+      });
+      return true;
+    } catch (e) {}
+  }
+  return false;
+}
+
+// ----------------------------------------------------------------------------
+// CLOUD BACKUP SYNC ENGINE (ntfy.sh)
 // ----------------------------------------------------------------------------
 function getTopicUrl(code) {
   const cleanCode = (code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   return `${NTFY_BASE_URL}${cleanCode}`;
 }
 
-// Publish room state to the cloud
 async function publishRoomToCloud(room) {
   if (!room || !room.code) return;
   try {
@@ -97,12 +217,9 @@ async function publishRoomToCloud(room) {
       method: 'POST',
       body: JSON.stringify(room)
     });
-  } catch (e) {
-    console.warn('Could not publish to cloud:', e);
-  }
+  } catch (e) {}
 }
 
-// Fetch latest room state from the cloud
 async function fetchRoomFromCloud(code) {
   if (!code) return null;
   const cleanCode = code.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
@@ -114,7 +231,6 @@ async function fetchRoomFromCloud(code) {
     const text = await res.text();
     if (!text || !text.trim()) return null;
 
-    // ntfy returns line-delimited JSON messages. Parse the latest valid message.
     const lines = text.trim().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
@@ -125,17 +241,13 @@ async function fetchRoomFromCloud(code) {
             return roomObj;
           }
         }
-      } catch (err) {
-        // Continue checking preceding line
-      }
+      } catch (err) {}
     }
-  } catch (e) {
-    console.warn('Error fetching cloud room:', e);
-  }
+  } catch (e) {}
   return null;
 }
 
-// Live Polling & Sync across devices
+// Cloud polling interval
 let pollerActiveRoomCode = null;
 setInterval(async () => {
   if (!pollerActiveRoomCode) return;
@@ -147,10 +259,8 @@ setInterval(async () => {
       saveRoomsData(rooms);
       notifyListeners(pollerActiveRoomCode);
     }
-  } catch (e) {
-    // Ignore polling errors
-  }
-}, 2500);
+  } catch (e) {}
+}, 2000);
 
 export function setActivePollRoom(code) {
   pollerActiveRoomCode = code;
@@ -177,13 +287,16 @@ export function createRoom(teacherName, roomTitle, questionText) {
 
   rooms[roomCode] = newRoom;
   saveRoomsData(rooms);
+  
+  // Activate WebRTC & Cloud
+  initTeacherPeer(roomCode);
   publishRoomToCloud(newRoom);
   setActivePollRoom(roomCode);
   broadcastChange('CREATE_ROOM', { roomCode });
   return newRoom;
 }
 
-// 2. Get Room (Local + Cloud fallback)
+// 2. Get Room
 export function getRoom(roomCode) {
   if (!roomCode) return null;
   const rooms = getRoomsData();
@@ -195,21 +308,22 @@ export async function getRoomAsync(roomCode) {
   if (!roomCode) return null;
   const code = roomCode.toUpperCase().trim();
 
-  // Check local first
   let room = getRoom(code);
   
-  // Try fetching from cloud
+  // Try cloud fetch
   const cloudRoom = await fetchRoomFromCloud(code);
   if (cloudRoom) {
     const rooms = getRoomsData();
     rooms[code] = cloudRoom;
     saveRoomsData(rooms);
     setActivePollRoom(code);
+    connectStudentPeer(code);
     return cloudRoom;
   }
 
   if (room) {
     setActivePollRoom(code);
+    connectStudentPeer(code);
     return room;
   }
 
@@ -224,6 +338,7 @@ export function updateRoomQuestion(roomCode, newQuestion) {
     room.question = newQuestion;
     saveRoomsData(rooms);
     publishRoomToCloud(room);
+    broadcastToStudents(room);
     broadcastChange('UPDATE_QUESTION', { roomCode });
     notifyListeners(roomCode);
   }
@@ -237,7 +352,6 @@ export async function addStudentResponse(roomCode, studentName, responseText) {
   }
   if (!room) return null;
 
-  // Calculate next pastel color (cyclical index 0..4)
   const colorIndex = room.responses.length % PASTEL_COLORS.length;
 
   const newResponse = {
@@ -249,13 +363,15 @@ export async function addStudentResponse(roomCode, studentName, responseText) {
     isPinned: false
   };
 
-  room.responses.unshift(newResponse); // Newer responses first
+  room.responses.unshift(newResponse);
   
   const rooms = getRoomsData();
   rooms[roomCode] = room;
   saveRoomsData(rooms);
   
+  sendResponseToTeacherP2P(studentName, responseText);
   publishRoomToCloud(room);
+  broadcastToStudents(room);
   broadcastChange('ADD_RESPONSE', { roomCode, responseId: newResponse.id });
   notifyListeners(roomCode);
   return newResponse;
@@ -272,6 +388,7 @@ export function togglePinResponse(roomCode, responseId) {
       room.responses.sort((a, b) => (b.isPinned ? 1 : 0) - (a.isPinned ? 1 : 0));
       saveRoomsData(rooms);
       publishRoomToCloud(room);
+      broadcastToStudents(room);
       broadcastChange('PIN_RESPONSE', { roomCode, responseId });
       notifyListeners(roomCode);
     }
@@ -286,6 +403,7 @@ export function deleteResponse(roomCode, responseId) {
     room.responses = room.responses.filter(r => r.id !== responseId);
     saveRoomsData(rooms);
     publishRoomToCloud(room);
+    broadcastToStudents(room);
     broadcastChange('DELETE_RESPONSE', { roomCode, responseId });
     notifyListeners(roomCode);
   }
@@ -299,6 +417,7 @@ export function clearAllResponses(roomCode) {
     room.responses = [];
     saveRoomsData(rooms);
     publishRoomToCloud(room);
+    broadcastToStudents(room);
     broadcastChange('CLEAR_RESPONSES', { roomCode });
     notifyListeners(roomCode);
   }
