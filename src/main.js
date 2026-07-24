@@ -1,11 +1,13 @@
 import {
   createRoom,
   getRoom,
+  getRoomAsync,
   updateRoomQuestion,
   addStudentResponse,
   togglePinResponse,
   deleteResponse,
   clearAllResponses,
+  setActivePollRoom,
   subscribeState,
   PASTEL_COLORS
 } from './store.js';
@@ -49,8 +51,10 @@ function switchView(role, roomCode = null) {
   }
 
   if (role === 'teacher' && roomCode) {
+    setActivePollRoom(roomCode);
     renderTeacherView();
   } else if (role === 'student' && roomCode) {
+    setActivePollRoom(roomCode);
     renderStudentView();
   }
 
@@ -105,13 +109,14 @@ document.getElementById('form-create-room')?.addEventListener('submit', (e) => {
   switchView('teacher', room.code);
 });
 
-// Form: Join Room (Student)
-document.getElementById('form-join-room')?.addEventListener('submit', (e) => {
+// Form: Join Room (Student) - Async cloud room check
+document.getElementById('form-join-room')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const studentName = document.getElementById('join-student-name').value;
   const roomCode = document.getElementById('join-room-code').value.toUpperCase().trim();
 
-  const room = getRoom(roomCode);
+  showToast('🔍 Buscando sala...');
+  const room = await getRoomAsync(roomCode);
   if (!room) {
     showToast('❌ El código de sala no existe. Verifica e intenta de nuevo.');
     return;
