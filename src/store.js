@@ -1,8 +1,8 @@
-// Participa Store & Cloud Sync Engine
+// Participa Store & Multi-Device Cloud Engine (Powered by ntfy.sh)
 
 const STORAGE_KEY = 'participa_app_rooms_v1';
 const CHANNEL_NAME = 'participa_channel_v1';
-const CLOUD_API_URL = 'https://crudcrud.com/api/bf71fb9227d74f989f92740fd2d23d80/rooms';
+const NTFY_BASE_URL = 'https://ntfy.sh/participa_room_';
 
 // Color pastel mapping
 export const PASTEL_COLORS = [
@@ -13,7 +13,7 @@ export const PASTEL_COLORS = [
   { id: 4, name: 'Lila', bg: '#F1E6FF', border: '#DBC4F0' }
 ];
 
-// BroadcastChannel instance for local same-device tabs
+// BroadcastChannel for local same-browser tabs
 let broadcastChannel = null;
 if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
   broadcastChannel = new BroadcastChannel(CHANNEL_NAME);
@@ -81,81 +81,76 @@ export function generateRoomCode() {
 }
 
 // ----------------------------------------------------------------------------
-// CLOUD API SYNC HELPERS (Works across different mobile phones & computers)
+// GLOBAL MULTI-DEVICE CLOUD SYNC ENGINE (ntfy.sh)
 // ----------------------------------------------------------------------------
-async function fetchCloudRooms() {
+function getTopicUrl(code) {
+  const cleanCode = (code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  return `${NTFY_BASE_URL}${cleanCode}`;
+}
+
+// Publish room state to the cloud
+async function publishRoomToCloud(room) {
+  if (!room || !room.code) return;
   try {
-    const res = await fetch(CLOUD_API_URL);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
+    const topicUrl = getTopicUrl(room.code);
+    await fetch(topicUrl, {
+      method: 'POST',
+      body: JSON.stringify(room)
+    });
   } catch (e) {
-    console.warn('Cloud sync offline fallback:', e);
-    return [];
+    console.warn('Could not publish to cloud:', e);
   }
 }
 
-async function saveRoomToCloud(room) {
+// Fetch latest room state from the cloud
+async function fetchRoomFromCloud(code) {
+  if (!code) return null;
+  const cleanCode = code.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   try {
-    // Check if room already exists on cloud
-    const cloudRooms = await fetchCloudRooms();
-    const existing = cloudRooms.find(r => r.code === room.code);
+    const topicUrl = `${getTopicUrl(cleanCode)}/json?poll=1`;
+    const res = await fetch(topicUrl);
+    if (!res.ok) return null;
+    
+    const text = await res.text();
+    if (!text || !text.trim()) return null;
 
-    const payload = {
-      code: room.code,
-      teacherName: room.teacherName,
-      title: room.title,
-      question: room.question,
-      createdAt: room.createdAt,
-      isActive: room.isActive,
-      responses: room.responses
-    };
-
-    if (existing && existing._id) {
-      // Update existing record
-      await fetch(`${CLOUD_API_URL}/${existing._id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-    } else {
-      // Create new record
-      await fetch(CLOUD_API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+    // ntfy returns line-delimited JSON messages. Parse the latest valid message.
+    const lines = text.trim().split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const item = JSON.parse(lines[i]);
+        if (item && item.message) {
+          const roomObj = JSON.parse(item.message);
+          if (roomObj && roomObj.code) {
+            return roomObj;
+          }
+        }
+      } catch (err) {
+        // Continue checking preceding line
+      }
     }
   } catch (e) {
-    console.warn('Could not sync to cloud:', e);
+    console.warn('Error fetching cloud room:', e);
   }
+  return null;
 }
 
-// Periodic Cloud Poller (every 3 seconds) for live updates across devices
+// Live Polling & Sync across devices
 let pollerActiveRoomCode = null;
 setInterval(async () => {
   if (!pollerActiveRoomCode) return;
   try {
-    const cloudRooms = await fetchCloudRooms();
-    const cloudRoom = cloudRooms.find(r => r.code === pollerActiveRoomCode);
+    const cloudRoom = await fetchRoomFromCloud(pollerActiveRoomCode);
     if (cloudRoom) {
       const rooms = getRoomsData();
-      rooms[pollerActiveRoomCode] = {
-        code: cloudRoom.code,
-        teacherName: cloudRoom.teacherName,
-        title: cloudRoom.title,
-        question: cloudRoom.question,
-        createdAt: cloudRoom.createdAt,
-        isActive: cloudRoom.isActive,
-        responses: cloudRoom.responses || []
-      };
+      rooms[pollerActiveRoomCode] = cloudRoom;
       saveRoomsData(rooms);
       notifyListeners(pollerActiveRoomCode);
     }
   } catch (e) {
     // Ignore polling errors
   }
-}, 3000);
+}, 2500);
 
 export function setActivePollRoom(code) {
   pollerActiveRoomCode = code;
@@ -182,13 +177,13 @@ export function createRoom(teacherName, roomTitle, questionText) {
 
   rooms[roomCode] = newRoom;
   saveRoomsData(rooms);
-  saveRoomToCloud(newRoom);
+  publishRoomToCloud(newRoom);
   setActivePollRoom(roomCode);
   broadcastChange('CREATE_ROOM', { roomCode });
   return newRoom;
 }
 
-// 2. Get Room (Synchronous Local + Asynchronous Cloud fallback)
+// 2. Get Room (Local + Cloud fallback)
 export function getRoom(roomCode) {
   if (!roomCode) return null;
   const rooms = getRoomsData();
@@ -200,34 +195,22 @@ export async function getRoomAsync(roomCode) {
   if (!roomCode) return null;
   const code = roomCode.toUpperCase().trim();
 
-  // 1. Check local
+  // Check local first
   let room = getRoom(code);
+  
+  // Try fetching from cloud
+  const cloudRoom = await fetchRoomFromCloud(code);
+  if (cloudRoom) {
+    const rooms = getRoomsData();
+    rooms[code] = cloudRoom;
+    saveRoomsData(rooms);
+    setActivePollRoom(code);
+    return cloudRoom;
+  }
+
   if (room) {
     setActivePollRoom(code);
     return room;
-  }
-
-  // 2. Fetch from cloud if not found locally
-  try {
-    const cloudRooms = await fetchCloudRooms();
-    const cloudRoom = cloudRooms.find(r => r.code === code);
-    if (cloudRoom) {
-      const rooms = getRoomsData();
-      rooms[code] = {
-        code: cloudRoom.code,
-        teacherName: cloudRoom.teacherName,
-        title: cloudRoom.title,
-        question: cloudRoom.question,
-        createdAt: cloudRoom.createdAt,
-        isActive: cloudRoom.isActive,
-        responses: cloudRoom.responses || []
-      };
-      saveRoomsData(rooms);
-      setActivePollRoom(code);
-      return rooms[code];
-    }
-  } catch (e) {
-    console.error('Error fetching room from cloud', e);
   }
 
   return null;
@@ -240,7 +223,7 @@ export function updateRoomQuestion(roomCode, newQuestion) {
   if (room) {
     room.question = newQuestion;
     saveRoomsData(rooms);
-    saveRoomToCloud(room);
+    publishRoomToCloud(room);
     broadcastChange('UPDATE_QUESTION', { roomCode });
     notifyListeners(roomCode);
   }
@@ -272,7 +255,7 @@ export async function addStudentResponse(roomCode, studentName, responseText) {
   rooms[roomCode] = room;
   saveRoomsData(rooms);
   
-  saveRoomToCloud(room);
+  publishRoomToCloud(room);
   broadcastChange('ADD_RESPONSE', { roomCode, responseId: newResponse.id });
   notifyListeners(roomCode);
   return newResponse;
@@ -288,7 +271,7 @@ export function togglePinResponse(roomCode, responseId) {
       resp.isPinned = !resp.isPinned;
       room.responses.sort((a, b) => (b.isPinned ? 1 : 0) - (a.isPinned ? 1 : 0));
       saveRoomsData(rooms);
-      saveRoomToCloud(room);
+      publishRoomToCloud(room);
       broadcastChange('PIN_RESPONSE', { roomCode, responseId });
       notifyListeners(roomCode);
     }
@@ -302,7 +285,7 @@ export function deleteResponse(roomCode, responseId) {
   if (room) {
     room.responses = room.responses.filter(r => r.id !== responseId);
     saveRoomsData(rooms);
-    saveRoomToCloud(room);
+    publishRoomToCloud(room);
     broadcastChange('DELETE_RESPONSE', { roomCode, responseId });
     notifyListeners(roomCode);
   }
@@ -315,7 +298,7 @@ export function clearAllResponses(roomCode) {
   if (room) {
     room.responses = [];
     saveRoomsData(rooms);
-    saveRoomToCloud(room);
+    publishRoomToCloud(room);
     broadcastChange('CLEAR_RESPONSES', { roomCode });
     notifyListeners(roomCode);
   }

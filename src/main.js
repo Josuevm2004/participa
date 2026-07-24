@@ -486,7 +486,7 @@ document.getElementById('teacher-nav-logo')?.addEventListener('click', () => swi
 // ============================================================================
 // AUTO-DETECT ROOM CODE FROM URL (?code=ABC-123)
 // ============================================================================
-function checkUrlRoomCode() {
+async function checkUrlRoomCode() {
   const urlParams = new URLSearchParams(window.location.search);
   const codeParam = urlParams.get('code');
   if (codeParam) {
@@ -496,7 +496,8 @@ function checkUrlRoomCode() {
       joinInput.value = formattedCode;
       openModal('modal-join-room');
       document.getElementById('join-student-name')?.focus();
-      showToast(`📍 Código de sala ${formattedCode} detectado automáticamente.`);
+      showToast(`📍 Código de sala ${formattedCode} detectado. Conectando...`);
+      await getRoomAsync(formattedCode);
     }
   }
 }
