@@ -506,7 +506,10 @@ body {
   gap: 0.85rem;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
   position: relative;
-  animation: card-appear 0.3s ease-out forwards;
+}
+
+.response-card.new-card {
+  animation: card-appear 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @keyframes card-appear {

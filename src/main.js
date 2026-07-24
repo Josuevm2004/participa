@@ -139,6 +139,10 @@ document.getElementById('join-room-code')?.addEventListener('input', (e) => {
 // ============================================================================
 // 2. TEACHER VIEW LOGIC & RENDERING
 // ============================================================================
+// State signature cache to prevent flicker
+let lastRenderSignature = '';
+let renderedCardIds = new Set();
+
 function renderTeacherView() {
   const room = getRoom(currentRoomCode);
   if (!room) return;
@@ -149,14 +153,20 @@ function renderTeacherView() {
   document.getElementById('teacher-name-badge').textContent = `Profesor: ${room.teacherName}`;
   document.getElementById('teacher-question-text').textContent = room.question;
 
-  // Count
+  // Count updates
   const count = room.responses.length;
   document.getElementById('teacher-participant-count').textContent = `${count} ${count === 1 ? 'respuesta' : 'respuestas'}`;
   document.getElementById('wall-responses-count').textContent = `${count} ${count === 1 ? 'tarjeta en pantalla' : 'tarjetas en pantalla'}`;
 
+  // Smart signature check - if nothing changed, don't touch the DOM!
+  const currentSignature = `${room.question}_${room.responses.map(r => `${r.id}:${r.isPinned}:${r.text}`).join('|')}`;
+  if (currentSignature === lastRenderSignature) {
+    return; // ZERO flicker! Skip DOM rebuild
+  }
+  lastRenderSignature = currentSignature;
+
   // Render Response Wall Grid
   const grid = document.getElementById('responses-grid');
-  grid.innerHTML = '';
 
   if (room.responses.length === 0) {
     grid.innerHTML = `
@@ -170,16 +180,20 @@ function renderTeacherView() {
         </p>
       </div>
     `;
+    renderedCardIds.clear();
     return;
   }
 
-  // Render cards with alternating pastel colors
+  // Clear container
+  grid.innerHTML = '';
+
+  // Render cards
   room.responses.forEach(resp => {
     const card = document.createElement('div');
     const colorClass = `color-${resp.colorIndex % 5}`;
-    card.className = `response-card ${colorClass}`;
+    const isNew = !renderedCardIds.has(resp.id);
+    card.className = `response-card ${colorClass} ${isNew ? 'new-card' : ''}`;
     
-    // Time format
     const timeAgo = formatTimeAgo(resp.createdAt);
 
     card.innerHTML = `
@@ -227,6 +241,7 @@ function renderTeacherView() {
     `;
 
     grid.appendChild(card);
+    renderedCardIds.add(resp.id);
   });
 
   // Attach card event listeners
