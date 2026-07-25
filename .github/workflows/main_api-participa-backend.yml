@@ -58,5 +58,5 @@ jobs:
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'api-participa-backend-dmf5edfjhudjbucb'
+          app-name: 'api-participa-backend'
           package: '*.jar'
