@@ -3,7 +3,7 @@
 const API_BASE_URL = window.PARTICIPA_API_URL || (
   window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:8080/api'
-    : `${window.location.origin}/api`
+    : 'https://api-participa-backend-dmf5edfjhudjbucb.centralus-01.azurewebsites.net/api'
 );
 
 const STORAGE_KEY = 'participa_app_rooms_v1';
@@ -47,7 +47,7 @@ function broadcastChange(action, data) {
   }
   try {
     localStorage.setItem('participa_last_event', JSON.stringify(payload));
-  } catch (e) {}
+  } catch (e) { }
 }
 
 function getRoomsData() {
@@ -62,7 +62,7 @@ function getRoomsData() {
 function saveRoomsData(data) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (e) {}
+  } catch (e) { }
 }
 
 export function formatCodeWithHyphen(code) {
@@ -114,10 +114,10 @@ export function initTeacherPeer(roomCode) {
   const peerId = getPeerId(roomCode);
   try {
     if (teacherPeer) {
-      try { teacherPeer.destroy(); } catch (e) {}
+      try { teacherPeer.destroy(); } catch (e) { }
     }
     teacherPeer = new window.Peer(peerId, { debug: 1 });
-  } catch (e) {}
+  } catch (e) { }
 }
 
 export function connectStudentPeer(roomCode, onSyncCallback) {
@@ -125,10 +125,10 @@ export function connectStudentPeer(roomCode, onSyncCallback) {
   const hostPeerId = getPeerId(roomCode);
   try {
     if (studentPeer) {
-      try { studentPeer.destroy(); } catch (e) {}
+      try { studentPeer.destroy(); } catch (e) { }
     }
     studentPeer = new window.Peer();
-  } catch (e) {}
+  } catch (e) { }
 }
 
 // Live polling engine (polls backend Spring Boot & Cloud fallback every 1.5 seconds)
@@ -230,7 +230,7 @@ async function syncRoomWithCloud(code) {
             }
           }
         }
-      } catch (err) {}
+      } catch (err) { }
     });
 
     if (currentRoom && hasChanges) {
@@ -240,7 +240,7 @@ async function syncRoomWithCloud(code) {
     }
 
     return currentRoom;
-  } catch (e) {}
+  } catch (e) { }
   return null;
 }
 
