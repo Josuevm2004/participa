@@ -9,6 +9,15 @@ const API_BASE_URL = window.PARTICIPA_API_URL || (
 const STORAGE_KEY = 'participa_app_rooms_v1';
 const CHANNEL_NAME = 'participa_channel_v1';
 const NTFY_BASE_URL = 'https://ntfy.sh/participa_room_';
+const FETCH_TIMEOUT_MS = 5000; // 5 second timeout for all backend requests
+
+// Fetch with timeout to prevent infinite loading
+function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timeoutId));
+}
 
 // Color pastel mapping
 export const PASTEL_COLORS = [
@@ -154,7 +163,7 @@ async function syncRoomWithBackend(code) {
   const formattedCode = formatCodeWithHyphen(code);
 
   try {
-    const res = await fetch(`${API_BASE_URL}/rooms/${formattedCode}`);
+    const res = await fetchWithTimeout(`${API_BASE_URL}/rooms/${formattedCode}`);
     if (res.ok) {
       const roomData = await res.json();
       if (roomData && roomData.code) {
@@ -162,11 +171,33 @@ async function syncRoomWithBackend(code) {
         return roomData;
       }
     }
+    // 404 = room doesn't exist in backend, but could exist in cloud
   } catch (e) {
-    // Backend offline fallback - try cloud ntfy
+    console.warn('Backend unreachable for syncRoom:', e.name === 'AbortError' ? 'timeout' : e.message);
+    // Backend offline/timeout fallback - try cloud ntfy
   }
 
   return await syncRoomWithCloud(formattedCode);
+}
+
+// Publish room snapshot to ntfy.sh for cross-device cloud fallback
+async function publishRoomToCloud(room) {
+  if (!room || !room.code) return;
+  const cleanTopicCode = room.code.replace(/[^a-zA-Z0-9]/g, '');
+  const topicUrl = `${NTFY_BASE_URL}${cleanTopicCode}`;
+
+  try {
+    await fetchWithTimeout(topicUrl, {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'ROOM_SNAPSHOT',
+        room: room
+      })
+      // No Content-Type header — ntfy stores plain text body as 'message'
+    });
+  } catch (e) {
+    console.warn('Cloud publish failed:', e.name === 'AbortError' ? 'timeout' : e.message);
+  }
 }
 
 async function syncRoomWithCloud(code) {
@@ -176,7 +207,7 @@ async function syncRoomWithCloud(code) {
 
   try {
     const topicUrl = `${NTFY_BASE_URL}${cleanTopicCode}/json?poll=1`;
-    const res = await fetch(topicUrl);
+    const res = await fetchWithTimeout(topicUrl);
     if (!res.ok) return null;
 
     const text = await res.text();
@@ -272,7 +303,7 @@ export function createRoom(teacherName, roomTitle, questionText) {
   broadcastChange('CREATE_ROOM', { roomCode });
 
   // Sync with Spring Boot backend asynchronously
-  fetch(`${API_BASE_URL}/rooms`, {
+  fetchWithTimeout(`${API_BASE_URL}/rooms`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({
@@ -290,8 +321,11 @@ export function createRoom(teacherName, roomTitle, questionText) {
       }
     })
     .catch(e => {
-      console.warn('Backend unavailable during createRoom, using local room state:', e);
+      console.warn('Backend unavailable during createRoom, using local room state:', e.name === 'AbortError' ? 'timeout' : e.message);
     });
+
+  // Also publish room snapshot to cloud (ntfy) for cross-device fallback
+  publishRoomToCloud(newRoom);
 
   return newRoom;
 }
@@ -311,7 +345,10 @@ export async function getRoomAsync(roomCode) {
   if (!roomCode) return null;
   const formattedCode = formatCodeWithHyphen(roomCode);
 
+  // Check local cache first (instant)
   let room = getRoom(formattedCode);
+
+  // Try backend sync
   const backendRoom = await syncRoomWithBackend(formattedCode);
 
   if (backendRoom) {
@@ -319,9 +356,21 @@ export async function getRoomAsync(roomCode) {
     return backendRoom;
   }
 
+  // If backend failed but we have a local copy, use it
   if (room) {
     setActivePollRoom(formattedCode);
     return room;
+  }
+
+  // Last resort: try cloud sync one more time with a longer timeout
+  try {
+    const cloudRoom = await syncRoomWithCloud(formattedCode);
+    if (cloudRoom) {
+      setActivePollRoom(formattedCode);
+      return cloudRoom;
+    }
+  } catch (e) {
+    console.warn('Cloud fallback also failed:', e.message);
   }
 
   return null;
@@ -340,7 +389,7 @@ export function updateRoomQuestion(roomCode, newQuestion) {
     updateLocalRoomCache(room);
   }
 
-  fetch(`${API_BASE_URL}/rooms/${code}/question`, {
+  fetchWithTimeout(`${API_BASE_URL}/rooms/${code}/question`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ question: qText })
@@ -350,7 +399,7 @@ export function updateRoomQuestion(roomCode, newQuestion) {
       if (updatedRoom) updateLocalRoomCache(updatedRoom);
     })
     .catch(e => {
-      console.warn('Backend error on updateRoomQuestion:', e);
+      console.warn('Backend error on updateRoomQuestion:', e.name === 'AbortError' ? 'timeout' : e.message);
     });
 
   broadcastChange('UPDATE_QUESTION', { roomCode: code });
@@ -382,7 +431,7 @@ export function addStudentResponse(roomCode, studentName, responseText) {
     updateLocalRoomCache(room);
   }
 
-  fetch(`${API_BASE_URL}/rooms/${code}/responses`, {
+  fetchWithTimeout(`${API_BASE_URL}/rooms/${code}/responses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({
@@ -395,8 +444,19 @@ export function addStudentResponse(roomCode, studentName, responseText) {
       if (createdResponse) syncRoomWithBackend(code);
     })
     .catch(e => {
-      console.warn('Backend unavailable on addStudentResponse:', e);
+      console.warn('Backend unavailable on addStudentResponse:', e.name === 'AbortError' ? 'timeout' : e.message);
     });
+
+  // Also publish response to cloud for cross-device sync
+  const cleanTopicCode = code.replace(/[^a-zA-Z0-9]/g, '');
+  fetchWithTimeout(`${NTFY_BASE_URL}${cleanTopicCode}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      type: 'STUDENT_RESPONSE',
+      response: tempResponse
+    })
+    // No Content-Type header — ntfy stores plain text body as 'message'
+  }).catch(() => {});
 
   broadcastChange('ADD_RESPONSE', { roomCode: code, responseId: tempResponse.id });
   return tempResponse;
@@ -417,11 +477,11 @@ export function togglePinResponse(roomCode, responseId) {
     }
   }
 
-  fetch(`${API_BASE_URL}/responses/${responseId}/pin`, {
+  fetchWithTimeout(`${API_BASE_URL}/responses/${responseId}/pin`, {
     method: 'PUT'
   })
     .then(res => res.ok ? syncRoomWithBackend(code) : null)
-    .catch(e => console.warn('Backend error on togglePinResponse:', e));
+    .catch(e => console.warn('Backend error on togglePinResponse:', e.name === 'AbortError' ? 'timeout' : e.message));
 
   broadcastChange('PIN_RESPONSE', { roomCode: code, responseId });
 }
@@ -437,11 +497,11 @@ export function deleteResponse(roomCode, responseId) {
     updateLocalRoomCache(room);
   }
 
-  fetch(`${API_BASE_URL}/responses/${responseId}`, {
+  fetchWithTimeout(`${API_BASE_URL}/responses/${responseId}`, {
     method: 'DELETE'
   })
     .then(res => res.ok ? syncRoomWithBackend(code) : null)
-    .catch(e => console.warn('Backend error on deleteResponse:', e));
+    .catch(e => console.warn('Backend error on deleteResponse:', e.name === 'AbortError' ? 'timeout' : e.message));
 
   broadcastChange('DELETE_RESPONSE', { roomCode: code, responseId });
 }
@@ -457,11 +517,11 @@ export function clearAllResponses(roomCode) {
     updateLocalRoomCache(room);
   }
 
-  fetch(`${API_BASE_URL}/rooms/${code}/responses`, {
+  fetchWithTimeout(`${API_BASE_URL}/rooms/${code}/responses`, {
     method: 'DELETE'
   })
     .then(res => res.ok ? syncRoomWithBackend(code) : null)
-    .catch(e => console.warn('Backend error on clearAllResponses:', e));
+    .catch(e => console.warn('Backend error on clearAllResponses:', e.name === 'AbortError' ? 'timeout' : e.message));
 
   broadcastChange('CLEAR_RESPONSES', { roomCode: code });
 }
