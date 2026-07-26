@@ -116,16 +116,59 @@ document.getElementById('form-join-room')?.addEventListener('submit', async (e) 
   const studentName = document.getElementById('join-student-name').value;
   const roomCode = document.getElementById('join-room-code').value.toUpperCase().trim();
 
-  showToast('🔍 Buscando sala...');
-  const room = await getRoomAsync(roomCode);
-  if (!room) {
-    showToast('❌ El código de sala no existe. Verifica e intenta de nuevo.');
+  if (!roomCode || roomCode.replace(/[^A-Z0-9]/g, '').length < 6) {
+    showToast('⚠️ Ingresa un código de sala válido de 6 caracteres.');
     return;
   }
 
-  currentStudentName = studentName;
-  showToast(`¡Unido a la sala ${room.title}!`);
-  switchView('student', room.code);
+  // Show loading state on button
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  const originalBtnText = submitBtn ? submitBtn.innerHTML : '';
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = `
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin-icon">
+        <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+      </svg>
+      <span>Buscando sala...</span>
+    `;
+  }
+
+  showToast('🔍 Buscando sala...');
+
+  try {
+    // Add a 10 second safety timeout for the entire join process
+    const joinTimeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('JOIN_TIMEOUT')), 10000)
+    );
+
+    const room = await Promise.race([
+      getRoomAsync(roomCode),
+      joinTimeout
+    ]);
+
+    if (!room) {
+      showToast('❌ No se encontró la sala. Verifica el código e intenta de nuevo.');
+      return;
+    }
+
+    currentStudentName = studentName;
+    showToast(`✅ ¡Unido a la sala "${room.title}"!`);
+    switchView('student', room.code);
+  } catch (err) {
+    if (err.message === 'JOIN_TIMEOUT') {
+      showToast('⏱️ La búsqueda tardó demasiado. El servidor puede estar inactivo. Intenta de nuevo.');
+    } else {
+      showToast('❌ Error al buscar la sala. Intenta de nuevo.');
+    }
+    console.warn('Join room error:', err);
+  } finally {
+    // Restore button state
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = originalBtnText;
+    }
+  }
 });
 
 // Auto-format room code input
